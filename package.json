@@ -1,0 +1,12 @@
+{
+  "name": "echo-speaks-login-builder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Build script that packages echo-speaks-server/login-server.js into standalone, no-Node-required executables (Windows/macOS/Linux). Does not modify echo-speaks-server itself.",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.21.0"
+  }
+}
