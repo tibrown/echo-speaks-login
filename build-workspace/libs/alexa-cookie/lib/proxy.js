@@ -6,6 +6,11 @@
 /* jslint esversion: 6 */
 "use strict";
 
+// ES-AX-PATCH v1 (2026-10-25): support Amazon identifier-first sign-in (/ax/claim)
+//  - strip CSP/HSTS headers from proxied responses (stops https upgrade of form posts)
+//  - rewrite root-relative action/href/src in proxied bodies into the proxy path
+//  - 307-redirect root-level Amazon paths (/ax, /ap, /cvf, /aaut, /gp) into the proxy path
+
 const modifyResponse = require('http-proxy-response-rewrite');
 const express = require('express');
 const proxy = require('http-proxy-middleware').createProxyMiddleware;
@@ -209,6 +214,18 @@ function initAmazonProxy(_options, callbackCookie, callbackListening) {
         return data;
     }
 
+    // ES-AX-PATCH: rewrite root-relative attribute URLs (e.g. action="/ax/claim?...") into the proxy path.
+    // Applied to response bodies only (not Location headers, which are handled separately below).
+    function replaceRootRelative(data, reqestHost) {
+        const host = (reqestHost && reqestHost.endsWith(_options.baseAmazonPage)) ? reqestHost : `www.${_options.baseAmazonPage}`;
+        const prefix = `${_options.proxyRootPath}/${host}/`;
+        const proxyRoot = (_options.proxyRootPath || '').replace(/^\//, '');
+        return data.replace(/(\s(?:action|formaction|href|src)\s*=\s*["'])\/(?!\/)([^"']*)/gi, function (match, attr, rest) {
+            if (proxyRoot && rest.startsWith(proxyRoot + '/')) return match; // already rewritten
+            return attr + prefix + rest;
+        });
+    }
+
     function replaceHostsBack(data) {
         let localHost = getLocalHost();
         const amazonRegex = new RegExp(`${_options.protocolPrefix}://${localHost}${_options.proxyRootPath}/www.${_options.baseAmazonPage}/`.replace(/\./g, "\\."), 'g');
@@ -287,6 +304,13 @@ function initAmazonProxy(_options, callbackCookie, callbackListening) {
     }
 
     function onProxyRes(proxyRes, req, res) {
+        // ES-AX-PATCH: drop headers that make the browser upgrade proxied requests to https
+        if (proxyRes && proxyRes.headers) {
+            delete proxyRes.headers['content-security-policy'];
+            delete proxyRes.headers['content-security-policy-report-only'];
+            delete proxyRes.headers['strict-transport-security'];
+        }
+
         const url = req.originalUrl || req.url;
         if (url.endsWith('.ico') || url.endsWith('.js') || url.endsWith('.ttf') || url.endsWith('.svg') || url.endsWith('.png') || url.endsWith('.appcache')) return;
         if (url.startsWith('/ap/uedata')) return;
@@ -349,6 +373,7 @@ function initAmazonProxy(_options, callbackCookie, callbackListening) {
             if (body) {
                 const bodyOrig = body;
                 body = replaceHosts(body);
+                body = replaceRootRelative(body, reqestHost); // ES-AX-PATCH
                 if (body !== bodyOrig) {
                     _options.logger && _options.logger('Alexa-Cookie: MODIFIED Response Body to rewrite URLs');
                     _options.logger && _options.logger('');
@@ -364,6 +389,18 @@ function initAmazonProxy(_options, callbackCookie, callbackListening) {
     const myProxy = proxy(optionsAlexa);
     if (_options.expressInstance !== undefined) {
         _options.expressInstance.use(`${_options.proxyRootPath}`, myProxy);
+
+        // ES-AX-PATCH: safety net for root-level Amazon paths built outside the rewritten HTML.
+        // 307 preserves method and body (POST stays POST). Registered once per Express app.
+        if (!_options.expressInstance.__esAxPatch) {
+            _options.expressInstance.__esAxPatch = true;
+            _options.expressInstance.use(['/ax', '/ap', '/cvf', '/aaut', '/gp'], function (req, res) {
+                const target = `${_options.proxyRootPath}/www.${_options.baseAmazonPage}${req.originalUrl}`;
+                _options.logger && _options.logger('ES-AX-PATCH: redirect ' + req.method + ' ' + req.originalUrl.split('?')[0] + ' -> ' + target.split('?')[0]);
+                res.redirect(307, target);
+            });
+        }
+
         callbackListening(_options.expressInstance);
     } else {
         const app = express();
